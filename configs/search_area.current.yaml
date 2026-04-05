@@ -1,0 +1,14 @@
+google_maps_api_key: YOUR-KEY-HERE
+
+query:
+  image: data/input/example.jpg
+  drone_altitude_m: 68
+  camera:
+    fov_diagonal_deg: 83.0
+
+prior_location:
+  latitude: 55.86705414350195
+  longitude: -0.9166594914687502 
+
+search:
+  radius_meters: 100

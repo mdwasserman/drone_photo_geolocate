@@ -1,0 +1,794 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Drone Photo Geolocate</title>
+  <style>
+    html, body, #root { height: 100%; margin: 0; }
+    body { background: #0f1419; }
+    .canvas-wrap { width: 100%; background: #0b1015; border: 1px solid #2b3a4a; border-radius: 10px; overflow: hidden; }
+    .canvas-wrap canvas { width: 100%; height: auto; display: block; }
+    .tile-grid {
+      display: grid;
+      gap: 8px;
+      width: 100%;
+    }
+    .tile-cell {
+      position: relative;
+      border: 1px solid #2b3a4a;
+      border-radius: 8px;
+      overflow: hidden;
+      min-height: 120px;
+      background: #101922;
+    }
+    .tile-cell img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .tile-badge {
+      position: absolute;
+      left: 6px;
+      top: 6px;
+      padding: 2px 6px;
+      border-radius: 6px;
+      font-size: 11px;
+      background: rgba(0, 0, 0, 0.72);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.2);
+    }
+  </style>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@mui/material@5/umd/material-ui.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="env,react">
+    const {
+      CssBaseline,
+      ThemeProvider,
+      createTheme,
+      Box,
+      Grid,
+      Paper,
+      Typography,
+      FormControl,
+      InputLabel,
+      Select,
+      MenuItem,
+      Tabs,
+      Tab,
+      Divider,
+      List,
+      ListItemButton,
+      ListItemText,
+      Stack,
+      Chip,
+      Slider,
+      FormControlLabel,
+      Checkbox,
+      Table,
+      TableHead,
+      TableBody,
+      TableRow,
+      TableCell,
+      Alert,
+      CircularProgress,
+    } = MaterialUI;
+
+    const { useEffect, useMemo, useRef, useState } = React;
+
+    function fetchJSON(url) {
+      return fetch(url).then((resp) => {
+        if (!resp.ok) {
+          throw new Error(`${url} failed (${resp.status})`);
+        }
+        return resp.json();
+      });
+    }
+
+    function imgUrl(path, token) {
+      return `/image?path=${encodeURIComponent(path || "")}&v=${encodeURIComponent(token || "")}`;
+    }
+
+    function scoreForMode(tile, mode) {
+      if (!tile || typeof tile !== "object") return 0;
+      if (mode === "inlier_count_mean_confidence") {
+        const direct = Number(tile.score_inlier_count_mean_confidence);
+        if (Number.isFinite(direct)) return direct;
+        return Number(tile.full_inlier_count || 0) * Number(tile.full_mean_confidence || 0);
+      }
+      const direct = Number(tile.score_match_count_mean_confidence);
+      if (Number.isFinite(direct)) return direct;
+      return Number(tile.full_match_count || 0) * Number(tile.full_mean_confidence || 0);
+    }
+
+    function shortlistRanked(payload, scoringMode) {
+      if (!payload) return [];
+      let base = Array.isArray(payload.shortlist_tiles) && payload.shortlist_tiles.length
+        ? payload.shortlist_tiles
+        : ((payload.summary && Array.isArray(payload.summary.ranked_tiles)) ? payload.summary.ranked_tiles : []);
+      base = base.filter((x) => x && typeof x === "object");
+      return [...base]
+        .map((t, i) => ({ ...t, _gui_score: scoreForMode(t, scoringMode), _idx: i }))
+        .sort((a, b) => {
+          const d = Number(b._gui_score || 0) - Number(a._gui_score || 0);
+          if (Math.abs(d) > 1e-12) return d;
+          return Number(a._idx || 0) - Number(b._idx || 0);
+        });
+    }
+
+    function drawMarker(ctx, x, y) {
+      ctx.beginPath();
+      ctx.fillStyle = "rgba(95,179,255,0.30)";
+      ctx.arc(x, y, 22, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.strokeStyle = "rgba(95,179,255,0.95)";
+      ctx.lineWidth = 4;
+      ctx.arc(x, y, 10, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.fillStyle = "rgba(255,209,102,0.98)";
+      ctx.arc(x, y, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function formatMaybeNumber(value, digits = 3) {
+      const n = Number(value);
+      return Number.isFinite(n) ? n.toFixed(digits) : "n/a";
+    }
+
+    function drawPointCallout(ctx, x, y, lines) {
+      const valid = Array.isArray(lines) ? lines.filter((s) => String(s || "").trim().length > 0) : [];
+      if (!valid.length) return;
+      ctx.save();
+      ctx.font = "12px sans-serif";
+      const textWidths = valid.map((line) => ctx.measureText(line).width);
+      const boxW = Math.max(120, Math.max(...textWidths) + 16);
+      const lineH = 14;
+      const boxH = 8 + (lineH * valid.length) + 4;
+      let bx = x + 12;
+      let by = y - boxH - 12;
+      if (bx + boxW > ctx.canvas.width - 6) bx = Math.max(6, x - boxW - 12);
+      if (by < 6) by = Math.min(ctx.canvas.height - boxH - 6, y + 12);
+      ctx.fillStyle = "rgba(0,0,0,0.70)";
+      ctx.fillRect(bx, by, boxW, boxH);
+      ctx.strokeStyle = "rgba(255,255,255,0.32)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(bx, by, boxW, boxH);
+      valid.forEach((line, i) => {
+        ctx.fillStyle = i === 0 ? "rgba(255,255,255,0.96)" : "rgba(207,228,255,0.95)";
+        ctx.fillText(line, bx + 8, by + 17 + (i * lineH));
+      });
+      ctx.restore();
+    }
+
+    function AnnotatedImageCanvas({ imagePath, markerMode, markerPx, label, token, canvasWidth = 900, canvasHeight = 900 }) {
+      const ref = useRef(null);
+
+      useEffect(() => {
+        const canvas = ref.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#0b1015";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        if (!imagePath) {
+          ctx.fillStyle = "#9fb0c3";
+          ctx.fillText("No image", 16, 24);
+          return;
+        }
+        const img = new Image();
+        img.onload = () => {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          const scale = Math.min(canvas.width / Math.max(img.naturalWidth, 1), canvas.height / Math.max(img.naturalHeight, 1));
+          const drawW = img.naturalWidth * scale;
+          const drawH = img.naturalHeight * scale;
+          const offsetX = (canvas.width - drawW) / 2;
+          const offsetY = (canvas.height - drawH) / 2;
+          ctx.drawImage(img, offsetX, offsetY, drawW, drawH);
+          let mx = canvas.width / 2;
+          let my = canvas.height / 2;
+          if (markerMode === "tile" && markerPx && Number.isFinite(Number(markerPx.x)) && Number.isFinite(Number(markerPx.y))) {
+            mx = offsetX + ((Number(markerPx.x) / Math.max(img.naturalWidth, 1)) * drawW);
+            my = offsetY + ((Number(markerPx.y) / Math.max(img.naturalHeight, 1)) * drawH);
+          }
+          if (markerMode === "center" || markerMode === "tile") {
+            drawMarker(ctx, mx, my);
+          }
+          if (label) {
+            drawPointCallout(ctx, mx, my, [label]);
+          }
+        };
+        img.src = imgUrl(imagePath, token);
+      }, [imagePath, markerMode, markerPx?.x, markerPx?.y, label, token, canvasWidth, canvasHeight]);
+
+      return (
+        <Box className="canvas-wrap">
+          <canvas ref={ref} width={canvasWidth} height={canvasHeight}></canvas>
+        </Box>
+      );
+    }
+
+    function ExplorerCanvases({ queryPath, tilePath, points, token }) {
+      const qRef = useRef(null);
+      const tRef = useRef(null);
+      const qImgRef = useRef(null);
+      const tImgRef = useRef(null);
+      const mappedRef = useRef([]);
+      const [hoverIndex, setHoverIndex] = useState(null);
+      const [lockedIndex, setLockedIndex] = useState(null);
+      const [imageVersion, setImageVersion] = useState(0);
+
+      useEffect(() => {
+        setHoverIndex(null);
+        setLockedIndex(null);
+        mappedRef.current = [];
+      }, [queryPath, tilePath, token]);
+
+      useEffect(() => {
+        const qCanvas = qRef.current;
+        const tCanvas = tRef.current;
+        if (!qCanvas || !tCanvas) return;
+        const qCtx = qCanvas.getContext("2d");
+        const tCtx = tCanvas.getContext("2d");
+
+        qCtx.clearRect(0, 0, qCanvas.width, qCanvas.height);
+        qCtx.fillStyle = "#0b1015";
+        qCtx.fillRect(0, 0, qCanvas.width, qCanvas.height);
+        tCtx.clearRect(0, 0, tCanvas.width, tCanvas.height);
+        tCtx.fillStyle = "#0b1015";
+        tCtx.fillRect(0, 0, tCanvas.width, tCanvas.height);
+
+        qImgRef.current = null;
+        tImgRef.current = null;
+        if (!queryPath || !tilePath) {
+          setImageVersion((v) => v + 1);
+          return;
+        }
+
+        let cancelled = false;
+        let loaded = 0;
+        const qImg = new Image();
+        const tImg = new Image();
+        const onDone = () => {
+          loaded += 1;
+          if (cancelled || loaded < 2) return;
+          qImgRef.current = qImg;
+          tImgRef.current = tImg;
+          setImageVersion((v) => v + 1);
+        };
+        const onFail = () => {
+          if (cancelled) return;
+          qImgRef.current = null;
+          tImgRef.current = null;
+          setImageVersion((v) => v + 1);
+        };
+        qImg.onload = onDone;
+        tImg.onload = onDone;
+        qImg.onerror = onFail;
+        tImg.onerror = onFail;
+        qImg.src = imgUrl(queryPath, token);
+        tImg.src = imgUrl(tilePath, token);
+        return () => {
+          cancelled = true;
+        };
+      }, [queryPath, tilePath, token]);
+
+      useEffect(() => {
+        const qCanvas = qRef.current;
+        const tCanvas = tRef.current;
+        const qImg = qImgRef.current;
+        const tImg = tImgRef.current;
+        if (!qCanvas || !tCanvas) return;
+        const qCtx = qCanvas.getContext("2d");
+        const tCtx = tCanvas.getContext("2d");
+
+        qCtx.clearRect(0, 0, qCanvas.width, qCanvas.height);
+        qCtx.fillStyle = "#0b1015";
+        qCtx.fillRect(0, 0, qCanvas.width, qCanvas.height);
+        tCtx.clearRect(0, 0, tCanvas.width, tCanvas.height);
+        tCtx.fillStyle = "#0b1015";
+        tCtx.fillRect(0, 0, tCanvas.width, tCanvas.height);
+
+        if (!(qImg && tImg && qImg.naturalWidth > 0 && qImg.naturalHeight > 0 && tImg.naturalWidth > 0 && tImg.naturalHeight > 0)) {
+          mappedRef.current = [];
+          return;
+        }
+
+        const fitRect = (imgW, imgH, canvasW, canvasH) => {
+          const scale = Math.min(canvasW / Math.max(imgW, 1), canvasH / Math.max(imgH, 1));
+          const drawW = imgW * scale;
+          const drawH = imgH * scale;
+          const offsetX = (canvasW - drawW) / 2;
+          const offsetY = (canvasH - drawH) / 2;
+          return { scale, drawW, drawH, offsetX, offsetY };
+        };
+
+        const qFit = fitRect(qImg.naturalWidth, qImg.naturalHeight, qCanvas.width, qCanvas.height);
+        const tFit = fitRect(tImg.naturalWidth, tImg.naturalHeight, tCanvas.width, tCanvas.height);
+
+        qCtx.drawImage(qImg, qFit.offsetX, qFit.offsetY, qFit.drawW, qFit.drawH);
+        tCtx.drawImage(tImg, tFit.offsetX, tFit.offsetY, tFit.drawW, tFit.drawH);
+
+        const mapped = [];
+        points.forEach((p, i) => {
+          const conf = Math.max(0, Math.min(1, Number(p.confidence || 0)));
+          const r = Math.round(255 * conf);
+          const g = Math.round(255 * (1 - Math.abs(conf - 0.5) * 2));
+          const b = Math.round(255 * (1 - conf));
+
+          const qx = qFit.offsetX + ((Number(p.x0 || 0) / Math.max(qImg.naturalWidth, 1)) * qFit.drawW);
+          const qy = qFit.offsetY + ((Number(p.y0 || 0) / Math.max(qImg.naturalHeight, 1)) * qFit.drawH);
+          const tx = tFit.offsetX + ((Number(p.x1 || 0) / Math.max(tImg.naturalWidth, 1)) * tFit.drawW);
+          const ty = tFit.offsetY + ((Number(p.y1 || 0) / Math.max(tImg.naturalHeight, 1)) * tFit.drawH);
+          if (![qx, qy, tx, ty].every(Number.isFinite)) return;
+          mapped.push({
+            _idx: i,
+            qx, qy, tx, ty,
+            conf, r, g, b,
+            inlier: !!p.inlier,
+            selected: !!p.selected,
+            novelty: Number(p.spatial_novelty),
+            uniqueness: Number(p.texture_uniqueness),
+            reproj: Number(p.reprojection_quality),
+          });
+        });
+        mappedRef.current = mapped;
+        const active = lockedIndex != null ? lockedIndex : hoverIndex;
+
+        mapped.forEach((m) => {
+          const isActive = active != null && m._idx === active;
+          const alpha = isActive ? 1.0 : (active != null ? 0.22 : 0.78);
+          const radius = isActive ? 6 : (m.selected ? 4 : 3);
+          const color = `rgba(${m.r},${m.g},${m.b},${alpha})`;
+          qCtx.beginPath(); qCtx.fillStyle = color; qCtx.arc(m.qx, m.qy, radius, 0, Math.PI * 2); qCtx.fill();
+          tCtx.beginPath(); tCtx.fillStyle = color; tCtx.arc(m.tx, m.ty, radius, 0, Math.PI * 2); tCtx.fill();
+        });
+
+        const activePoint = mapped.find((m) => active != null && m._idx === active);
+        if (activePoint) {
+          qCtx.beginPath();
+          qCtx.strokeStyle = "rgba(255,209,102,0.95)";
+          qCtx.lineWidth = 2;
+          qCtx.arc(activePoint.qx, activePoint.qy, 10, 0, Math.PI * 2);
+          qCtx.stroke();
+          tCtx.beginPath();
+          tCtx.strokeStyle = "rgba(255,209,102,0.95)";
+          tCtx.lineWidth = 2;
+          tCtx.arc(activePoint.tx, activePoint.ty, 10, 0, Math.PI * 2);
+          tCtx.stroke();
+          const lines = [
+            `match #${activePoint._idx} conf=${formatMaybeNumber(activePoint.conf, 3)}`,
+            `inlier=${activePoint.inlier ? "yes" : "no"} selected=${activePoint.selected ? "yes" : "no"}`,
+            `uniq=${formatMaybeNumber(activePoint.uniqueness, 3)} nov=${formatMaybeNumber(activePoint.novelty, 3)} reproj=${formatMaybeNumber(activePoint.reproj, 3)}`,
+          ];
+          drawPointCallout(qCtx, activePoint.qx, activePoint.qy, lines);
+          drawPointCallout(tCtx, activePoint.tx, activePoint.ty, lines);
+        }
+      }, [points, hoverIndex, lockedIndex, imageVersion]);
+
+      const nearestPointIndex = (evt, onTile) => {
+        const canvas = onTile ? tRef.current : qRef.current;
+        if (!canvas) return null;
+        const rect = canvas.getBoundingClientRect();
+        const px = (evt.clientX - rect.left) * (canvas.width / Math.max(rect.width, 1));
+        const py = (evt.clientY - rect.top) * (canvas.height / Math.max(rect.height, 1));
+        let best = null;
+        let bestDist = Number.POSITIVE_INFINITY;
+        mappedRef.current.forEach((m) => {
+          const x = onTile ? m.tx : m.qx;
+          const y = onTile ? m.ty : m.qy;
+          const d = ((x - px) * (x - px)) + ((y - py) * (y - py));
+          if (d < bestDist) {
+            bestDist = d;
+            best = m._idx;
+          }
+        });
+        return bestDist <= 20 * 20 ? best : null;
+      };
+
+      const onMove = (evt, onTile) => {
+        if (lockedIndex != null) return;
+        const idx = nearestPointIndex(evt, onTile);
+        setHoverIndex((prev) => (prev === idx ? prev : idx));
+      };
+
+      const onLeave = () => {
+        if (lockedIndex == null) setHoverIndex((prev) => (prev == null ? prev : null));
+      };
+
+      const onClick = (evt, onTile) => {
+        const idx = nearestPointIndex(evt, onTile);
+        if (idx == null) {
+          setLockedIndex(null);
+          setHoverIndex(null);
+          return;
+        }
+        if (lockedIndex === idx) {
+          setLockedIndex(null);
+          setHoverIndex(idx);
+        } else {
+          setLockedIndex(idx);
+          setHoverIndex(idx);
+        }
+      };
+
+      const active = lockedIndex != null ? lockedIndex : hoverIndex;
+      const activePoint = mappedRef.current.find((m) => active != null && m._idx === active) || null;
+
+      return (
+        <Stack spacing={1}>
+          <Grid container spacing={2}>
+            <Grid item xs={12} md={6}>
+              <Box className="canvas-wrap">
+                <canvas
+                  ref={qRef}
+                  width={900}
+                  height={900}
+                  onMouseMove={(evt) => onMove(evt, false)}
+                  onMouseLeave={onLeave}
+                  onClick={(evt) => onClick(evt, false)}
+                ></canvas>
+              </Box>
+            </Grid>
+            <Grid item xs={12} md={6}>
+              <Box className="canvas-wrap">
+                <canvas
+                  ref={tRef}
+                  width={900}
+                  height={900}
+                  onMouseMove={(evt) => onMove(evt, true)}
+                  onMouseLeave={onLeave}
+                  onClick={(evt) => onClick(evt, true)}
+                ></canvas>
+              </Box>
+            </Grid>
+          </Grid>
+          <Typography variant="caption" sx={{ color: "#9fb0c3" }}>
+            {activePoint
+              ? `match #${activePoint._idx} | conf=${formatMaybeNumber(activePoint.conf, 3)} | inlier=${activePoint.inlier ? "yes" : "no"} | selected=${activePoint.selected ? "yes" : "no"} | uniq=${formatMaybeNumber(activePoint.uniqueness, 3)} | novelty=${formatMaybeNumber(activePoint.novelty, 3)} | reproj=${formatMaybeNumber(activePoint.reproj, 3)}`
+              : "Hover near a point to inspect it. Click to lock/unlock highlight."}
+          </Typography>
+        </Stack>
+      );
+    }
+
+    function App() {
+      const [runs, setRuns] = useState([]);
+      const [defaultRunId, setDefaultRunId] = useState("");
+      const [runId, setRunId] = useState("");
+      const [payload, setPayload] = useState(null);
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState("");
+      const [scoringMode, setScoringMode] = useState("match_count_mean_confidence");
+      const [selectedIndex, setSelectedIndex] = useState(0);
+      const [tab, setTab] = useState(0);
+      const [mapScope, setMapScope] = useState("run");
+      const [branch, setBranch] = useState("raw");
+      const [minConf, setMinConf] = useState(0);
+      const [inlierOnly, setInlierOnly] = useState(false);
+      const [selectedOnly, setSelectedOnly] = useState(false);
+      const summaryReqSeq = useRef(0);
+
+      useEffect(() => {
+        setLoading(true);
+        fetchJSON("/api/runs")
+          .then((body) => {
+            const rs = Array.isArray(body.runs) ? body.runs : [];
+            setRuns(rs);
+            setDefaultRunId(String(body.default_run_id || rs[0]?.id || ""));
+            setRunId(String(body.default_run_id || rs[0]?.id || ""));
+          })
+          .catch((e) => setError(String(e)))
+          .finally(() => setLoading(false));
+      }, []);
+
+      useEffect(() => {
+        if (!runId) return;
+        const reqId = ++summaryReqSeq.current;
+        setLoading(true);
+        setError("");
+        setPayload(null);
+        setSelectedIndex(0);
+        fetchJSON(`/api/summary?run_id=${encodeURIComponent(runId)}`)
+          .then((body) => {
+            if (reqId !== summaryReqSeq.current) return;
+            setPayload(body);
+            setSelectedIndex(0);
+            const mode = String(body?.winner?.scoring_mode || "match_count_mean_confidence");
+            setScoringMode(mode === "inlier_count_mean_confidence" ? mode : "match_count_mean_confidence");
+          })
+          .catch((e) => {
+            if (reqId !== summaryReqSeq.current) return;
+            setError(String(e));
+          })
+          .finally(() => {
+            if (reqId !== summaryReqSeq.current) return;
+            setLoading(false);
+          });
+      }, [runId]);
+
+      const ranked = useMemo(() => shortlistRanked(payload, scoringMode), [payload, scoringMode]);
+      const selected = ranked[Math.max(0, Math.min(selectedIndex, ranked.length - 1))] || null;
+      const hasCoarseMap = useMemo(() => {
+        const coarseTiles = payload?.coarse?.index?.tiles;
+        const coarseRanked = payload?.coarse?.summary?.ranked_tiles;
+        return Array.isArray(coarseTiles) && coarseTiles.length > 0 && Array.isArray(coarseRanked) && coarseRanked.length > 0;
+      }, [payload]);
+
+      useEffect(() => {
+        if (!hasCoarseMap && mapScope !== "run") {
+          setMapScope("run");
+        }
+      }, [hasCoarseMap, mapScope]);
+
+      const diagMap = useMemo(() => {
+        const map = new Map();
+        const diags = payload?.diagnostics?.tiles;
+        if (Array.isArray(diags)) {
+          diags.forEach((d) => {
+            if (d && typeof d === "object") map.set(`${d.row}|${d.col}`, d);
+          });
+        }
+        return map;
+      }, [payload]);
+
+      const selectedDiag = selected ? diagMap.get(`${selected.row}|${selected.col}`) : null;
+
+      const explorerData = useMemo(() => {
+        if (!selected || !selectedDiag) return { points: [], metrics: {} };
+        const b = selectedDiag?.branches?.[branch];
+        const points = Array.isArray(b?.points) ? b.points : [];
+        const metrics = b && typeof b === "object" ? b : {};
+        const filtered = points.filter((p) => {
+          if (!p || typeof p !== "object") return false;
+          if (Number(p.confidence || 0) < minConf) return false;
+          if (inlierOnly && !p.inlier) return false;
+          if (selectedOnly && !p.selected) return false;
+          return true;
+        });
+        return { points: filtered.slice(0, 1800), metrics };
+      }, [selected, selectedDiag, branch, minConf, inlierOnly, selectedOnly]);
+
+      const mapData = useMemo(() => {
+        const useCoarse = mapScope === "coarse" && hasCoarseMap;
+        const mapIndex = useCoarse ? payload?.coarse?.index : payload?.index;
+        const tiles = Array.isArray(mapIndex?.tiles) ? mapIndex.tiles : [];
+        const side = Number(mapIndex?.meta?.tiles_per_side || Math.round(Math.sqrt(tiles.length || 1)) || 1);
+        const byRc = new Map();
+        tiles.forEach((t) => byRc.set(`${t.row}|${t.col}`, t));
+        const mapRanked = useCoarse
+          ? shortlistRanked(
+              {
+                summary: { ranked_tiles: Array.isArray(payload?.coarse?.summary?.ranked_tiles) ? payload.coarse.summary.ranked_tiles : [] },
+                shortlist_tiles: [],
+              },
+              scoringMode
+            )
+          : ranked;
+        const values = new Map();
+        mapRanked.forEach((t) => {
+          const v = scoreForMode(t, "match_count_mean_confidence");
+          values.set(`${t.row}|${t.col}`, Number(v));
+        });
+        const list = Array.from(values.values()).filter((v) => Number.isFinite(v));
+        const lo = list.length ? Math.min(...list) : 0;
+        const hi = list.length ? Math.max(...list) : 1;
+        const norm = (v) => Math.abs(hi - lo) < 1e-9 ? 1 : ((v - lo) / (hi - lo));
+        return { side: Math.max(1, Math.round(side)), byRc, values, lo, hi, norm };
+      }, [payload, ranked, mapScope, hasCoarseMap, scoringMode]);
+
+      const token = `${payload?.out_dir || ""}|${runId}|${scoringMode}`;
+
+      const theme = useMemo(() => createTheme({
+        palette: {
+          mode: "dark",
+          background: { default: "#0f1419", paper: "#17212b" },
+          primary: { main: "#5fb3ff" },
+        },
+      }), []);
+
+      return (
+        <ThemeProvider theme={theme}>
+          <CssBaseline />
+          <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "360px 1fr" }, minHeight: "100vh" }}>
+            <Box sx={{ borderRight: { md: "1px solid #2b3a4a" }, p: 1.5, background: "linear-gradient(180deg,#18222d,#111a23)" }}>
+              <Typography variant="h6" sx={{ mb: 1 }}>Ranking Review (MUI)</Typography>
+              <Stack spacing={1.5}>
+                <FormControl size="small" fullWidth>
+                  <InputLabel>Run</InputLabel>
+                  <Select value={runId || defaultRunId || ""} label="Run" onChange={(e) => setRunId(String(e.target.value))}>
+                    {runs.map((r) => (
+                      <MenuItem key={String(r.id)} value={String(r.id)}>{String(r.label || r.id)}</MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+
+                <FormControl size="small" fullWidth>
+                  <InputLabel>Scoring</InputLabel>
+                  <Select value={scoringMode} label="Scoring" onChange={(e) => setScoringMode(String(e.target.value))}>
+                    <MenuItem value="match_count_mean_confidence">match_count * mean_confidence</MenuItem>
+                    <MenuItem value="inlier_count_mean_confidence">inlier_count * mean_confidence</MenuItem>
+                  </Select>
+                </FormControl>
+
+                <Paper variant="outlined" sx={{ borderColor: "#2b3a4a", maxHeight: "68vh", overflow: "auto" }}>
+                  <List dense disablePadding>
+                    {ranked.map((t, i) => (
+                      <React.Fragment key={`${t.row}|${t.col}|${i}`}>
+                        <ListItemButton selected={i === selectedIndex} onClick={() => setSelectedIndex(i)}>
+                          <ListItemText
+                            primary={`#${i + 1} r${t.row} c${t.col}`}
+                            secondary={`score=${Number(t._gui_score || 0).toFixed(4)} | ${t.stage || ""}`}
+                          />
+                        </ListItemButton>
+                        {i < ranked.length - 1 && <Divider />}
+                      </React.Fragment>
+                    ))}
+                  </List>
+                </Paper>
+
+                {loading && <Stack direction="row" spacing={1} alignItems="center"><CircularProgress size={18} /><Typography variant="body2">Loading…</Typography></Stack>}
+                {error && <Alert severity="error">{error}</Alert>}
+              </Stack>
+            </Box>
+
+            <Box sx={{ p: 2 }}>
+              <Tabs value={tab} onChange={(_e, v) => setTab(v)} sx={{ mb: 2 }}>
+                <Tab label="Overview" />
+                <Tab label="LoFTR Map" />
+                <Tab label="Match Explorer" />
+              </Tabs>
+
+              {tab === 0 && (
+                <Stack spacing={2}>
+                  <Grid container spacing={2}>
+                    <Grid item xs={12} md={6}>
+                      <Paper variant="outlined" sx={{ p: 1.5, borderColor: "#2b3a4a" }}>
+                        <Typography variant="subtitle2" sx={{ mb: 1 }}>Query Image</Typography>
+                        <AnnotatedImageCanvas
+                          imagePath={payload?.winner?.query_image || ""}
+                          markerMode="center"
+                          label={selected?.query_center_estimate ? `${Number(selected.query_center_estimate.latitude).toFixed(7)}, ${Number(selected.query_center_estimate.longitude).toFixed(7)}` : "Estimated midpoint unavailable"}
+                          token={token}
+                          canvasWidth={1200}
+                          canvasHeight={800}
+                        />
+                        <Typography variant="caption" sx={{ mt: 0.8, display: "block", color: "#9fb0c3" }}>{String(payload?.winner?.query_image || "")}</Typography>
+                      </Paper>
+                    </Grid>
+                    <Grid item xs={12} md={6}>
+                      <Paper variant="outlined" sx={{ p: 1.5, borderColor: "#2b3a4a" }}>
+                        <Typography variant="subtitle2" sx={{ mb: 1 }}>Selected Tile</Typography>
+                        <AnnotatedImageCanvas
+                          imagePath={selected?.path || ""}
+                          markerMode="tile"
+                          markerPx={{ x: selected?.query_center_estimate?.tile_x_px, y: selected?.query_center_estimate?.tile_y_px }}
+                          label={selected?.query_center_estimate ? `${Number(selected.query_center_estimate.latitude).toFixed(7)}, ${Number(selected.query_center_estimate.longitude).toFixed(7)}` : "Estimated midpoint unavailable"}
+                          token={token}
+                          canvasWidth={900}
+                          canvasHeight={900}
+                        />
+                        <Typography variant="caption" sx={{ mt: 0.8, display: "block", color: "#9fb0c3" }}>{String(selected?.path || "")}</Typography>
+                      </Paper>
+                    </Grid>
+                  </Grid>
+
+                  <Paper variant="outlined" sx={{ p: 1.5, borderColor: "#2b3a4a" }}>
+                    <Typography variant="subtitle2" sx={{ mb: 1 }}>Estimated Query Midpoint</Typography>
+                    <Table size="small">
+                      <TableBody>
+                        {selected?.query_center_estimate ? Object.entries(selected.query_center_estimate).map(([k, v]) => (
+                          <TableRow key={k}><TableCell sx={{ color: "#9fb0c3", width: 240 }}>{k}</TableCell><TableCell>{String(v)}</TableCell></TableRow>
+                        )) : <TableRow><TableCell colSpan={2}>No estimate for this tile.</TableCell></TableRow>}
+                      </TableBody>
+                    </Table>
+                  </Paper>
+                </Stack>
+              )}
+
+              {tab === 1 && (
+                <Stack spacing={2}>
+                  <Paper variant="outlined" sx={{ p: 1.5, borderColor: "#2b3a4a" }}>
+                    <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} alignItems={{ md: "center" }}>
+                      {hasCoarseMap && (
+                        <FormControl size="small" sx={{ minWidth: 180 }}>
+                          <InputLabel>Tile Set</InputLabel>
+                          <Select value={mapScope} label="Tile Set" onChange={(e) => setMapScope(String(e.target.value))}>
+                            <MenuItem value="run">Refine (current run)</MenuItem>
+                            <MenuItem value="coarse">Coarse (all tiles)</MenuItem>
+                          </Select>
+                        </FormControl>
+                      )}
+                      <Chip label={"metric: full_match_count * mean_confidence"} />
+                      <Chip label={`tiles: ${mapData.byRc.size}`} />
+                      <Chip label={`min: ${Number(mapData.lo || 0).toFixed(3)}`} />
+                      <Chip label={`max: ${Number(mapData.hi || 0).toFixed(3)}`} />
+                    </Stack>
+                  </Paper>
+
+                  <Paper variant="outlined" sx={{ p: 1.5, borderColor: "#2b3a4a" }}>
+                    <Box className="tile-grid" sx={{ gridTemplateColumns: `repeat(${mapData.side}, minmax(100px, 1fr))` }}>
+                      {Array.from({ length: mapData.side * mapData.side }).map((_, idx) => {
+                        const r = Math.floor(idx / mapData.side);
+                        const c = idx % mapData.side;
+                        const key = `${r}|${c}`;
+                        const tile = mapData.byRc.get(key);
+                        const value = mapData.values.get(key);
+                        let overlay = "rgba(40,60,80,0.35)";
+                        if (Number.isFinite(Number(value))) {
+                          const n = mapData.norm(Number(value));
+                          const hue = Math.round((1 - n) * 220);
+                          overlay = `hsla(${hue}, 90%, 55%, ${0.10 + 0.33 * n})`;
+                        }
+                        return (
+                          <Box key={key} className="tile-cell" sx={{ borderColor: selected && Number(selected.row)===r && Number(selected.col)===c ? "#5fb3ff" : "#2b3a4a" }}>
+                            {tile?.path ? <img src={imgUrl(tile.path, token)} alt={`r${r} c${c}`} /> : null}
+                            <Box sx={{ position: "absolute", inset: 0, background: overlay }} />
+                            <Box className="tile-badge">{`r${r} c${c} ${Number.isFinite(Number(value)) ? Number(value).toFixed(3) : "n/a"}`}</Box>
+                          </Box>
+                        );
+                      })}
+                    </Box>
+                  </Paper>
+                </Stack>
+              )}
+
+              {tab === 2 && (
+                <Stack spacing={2}>
+                  <Paper variant="outlined" sx={{ p: 1.5, borderColor: "#2b3a4a" }}>
+                    <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+                      <FormControl size="small" sx={{ minWidth: 140 }}>
+                        <InputLabel>Branch</InputLabel>
+                        <Select value={branch} label="Branch" onChange={(e) => setBranch(String(e.target.value))}>
+                          <MenuItem value="raw">raw</MenuItem>
+                          <MenuItem value="structure">structure</MenuItem>
+                        </Select>
+                      </FormControl>
+
+                      <Box sx={{ minWidth: 220, px: 1, pt: 0.4 }}>
+                        <Typography variant="caption" sx={{ color: "#9fb0c3" }}>Confidence ≥ {Number(minConf).toFixed(2)}</Typography>
+                        <Slider value={minConf} min={0} max={1} step={0.01} onChange={(_e, v) => setMinConf(Number(v))} />
+                      </Box>
+
+                      <FormControlLabel control={<Checkbox checked={inlierOnly} onChange={(e) => setInlierOnly(e.target.checked)} />} label="inlier only" />
+                      <FormControlLabel control={<Checkbox checked={selectedOnly} onChange={(e) => setSelectedOnly(e.target.checked)} />} label="selected only" />
+                    </Stack>
+                  </Paper>
+
+                  {selected ? (
+                    <Paper variant="outlined" sx={{ p: 1.5, borderColor: "#2b3a4a" }}>
+                      <ExplorerCanvases
+                        queryPath={payload?.winner?.query_image || ""}
+                        tilePath={selected?.path || ""}
+                        points={explorerData.points}
+                        token={token}
+                      />
+                      <Stack direction="row" spacing={1} sx={{ mt: 1.2 }} flexWrap="wrap">
+                        <Chip label={`visible: ${explorerData.points.length}`} />
+                        <Chip label={`match_count: ${Number(explorerData.metrics?.match_count || 0)}`} />
+                        <Chip label={`inlier_count: ${Number(explorerData.metrics?.inlier_count || 0)}`} />
+                        <Chip label={`inlier_ratio: ${Number(explorerData.metrics?.inlier_ratio || 0).toFixed(3)}`} />
+                        <Chip label={`score: ${Number(explorerData.metrics?.score || 0).toFixed(3)}`} />
+                        <Chip label={`anchor_score: ${Number(explorerData.metrics?.anchor_score || 0).toFixed(3)}`} />
+                      </Stack>
+                    </Paper>
+                  ) : <Alert severity="info">Select a candidate to view diagnostics.</Alert>}
+                </Stack>
+              )}
+            </Box>
+          </Box>
+        </ThemeProvider>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
