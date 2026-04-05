@@ -195,7 +195,7 @@ Outputs are written to a new run folder in `data/archive/` and include:
 
 ## Troubleshooting
 
-- If you see `ModuleNotFoundError: No module named 'photo_geolocate'`, set `PYTHONPATH` first in that terminal:
+If you see `ModuleNotFoundError: No module named 'photo_geolocate'`, set `PYTHONPATH` first in that terminal:
 
 ```powershell
 $env:PYTHONPATH="src"
@@ -204,12 +204,9 @@ $env:PYTHONPATH="src"
 ```bash
 export PYTHONPATH=src
 ```
-```bash
-export PYTHONPATH=src
-```
 
 
-- If GUI/API calls fail unexpectedly, confirm the run folder contains:
+If GUI/API calls fail unexpectedly, confirm the run folder contains:
   - `winner.json`
   - `index.json`
   - `tile_match_summary.json`
