@@ -58,7 +58,7 @@ Open `http://127.0.0.1:8770`.
 
 ## Project Description
 
-The project pulls Google Maps tiles (online or cache) around a radius from an input location. It then uses [LoFTR](https://zju3dv.github.io/loftr/) to find the best tile match for a query image and estimate the true location. LoFTR outperformed the initial SuperPoint + SuperGlue implementation.
+The project pulls Google Maps tiles (online or cache) around a radius from an input location. It then uses [LoFTR](https://zju3dv.github.io/loftr/) to find the best tile match for a query image and estimate the true location. LoFTR outperformed the initial SuperPoint + SuperGlue implementation. The RANSAC algorithm can also be used to extract a more explicit homography to offer a different scoring method and further interrogation of image matches. 
 
 ![LoFTR matching demo](images/loftr_demo.gif)
 <sub>LoFTR in action</sub>
